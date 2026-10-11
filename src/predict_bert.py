@@ -154,11 +154,22 @@ inputs = {
     # ============================================================
     # MODEL PREDICTION
     # ============================================================
+    
+    # MODEL PREDICTION
+    # Explicitly pass only the inputs DistilBERT needs.
+    # Never forward the tokenizer's complete output dictionary.
+
     with torch.no_grad():
+        logits = model(
+            input_ids=inputs["input_ids"],
+            attention_mask=inputs.get("attention_mask"),
+        ).logits
 
-        logits = model(**inputs).logits
+        probs = torch.softmax(
+            logits,
+            dim=-1,
+        )[0].cpu().numpy()
 
-        probs = torch.softmax(logits, dim=-1)[0].cpu().numpy()
 
     pred_class = int(probs.argmax())
 
