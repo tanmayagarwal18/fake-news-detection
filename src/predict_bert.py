@@ -124,12 +124,17 @@ def predict_news_bert(text: str) -> dict:
     model, tokenizer, metadata = _load_artifacts()
 
     inputs = tokenizer(
-        cleaned,
-        truncation=True,
-        padding=True,
-        max_length=metadata["max_len"],
-        return_tensors="pt",
-    ).to(_DEVICE)
+    cleaned,
+    truncation=True,
+    padding=True,
+    max_length=metadata["max_len"],
+    return_tensors="pt",
+)
+
+# DistilBERT does not accept token_type_ids.
+inputs.pop("token_type_ids", None)
+
+inputs = {key: value.to(_DEVICE) for key, value in inputs.items()}
 
     with torch.no_grad():
         logits = model(**inputs).logits
