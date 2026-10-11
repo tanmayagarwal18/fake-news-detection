@@ -119,13 +119,24 @@ def predict_news_bert(text: str) -> dict:
     # TOKENIZATION
     # Uses exactly the same max length as training
     # ============================================================
-    inputs = tokenizer(
-        cleaned,
-        truncation=True,
-        padding=True,
-        max_length=metadata["max_len"],
-        return_tensors="pt",
-    ).to(_DEVICE)
+    
+inputs = tokenizer(
+    cleaned,
+    truncation=True,
+    padding=True,
+    max_length=metadata["max_len"],
+    return_tensors="pt",
+)
+
+# Remove this argument if the tokenizer provides it.
+inputs.pop("token_type_ids", None)
+
+# Move the remaining tensors to the model's device.
+inputs = {
+    key: value.to(_DEVICE)
+    for key, value in inputs.items()
+}
+
 
     # ============================================================
     # MODEL PREDICTION
