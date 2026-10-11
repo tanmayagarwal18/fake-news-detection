@@ -5,18 +5,15 @@ predict_bert.py
 Loads fine-tuned BERT/DistilBERT artifacts from Hugging Face
 and predicts whether a news article is FAKE or REAL.
 
-Required Hugging Face repository files:
+Hugging Face repository:
+    tanmayagarwal2005/fake-news-distilbert
+
+Required repository files:
     config.json
     model.safetensors
     metadata.json
     tokenizer.json
     tokenizer_config.json
-
-Repository:
-    tanmayagarwal2005/fake-news-distilbert
-
-Usage:
-    python src/predict_bert.py "Some headline or article text"
 
 Requires:
     torch, transformers, huggingface_hub
@@ -25,6 +22,7 @@ Requires:
 import os
 import sys
 import re
+import inspect
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
@@ -53,7 +51,7 @@ _DEVICE = None
 
 
 def minimal_clean(text: str) -> str:
-    """Apply the same minimal cleaning used during training."""
+    """Apply the minimal cleaning used during training."""
 
     if not isinstance(text, str) or not text.strip():
         return ""
@@ -72,32 +70,30 @@ def _load_artifacts():
     if _MODEL is not None:
         return _MODEL, _TOKENIZER, _METADATA
 
-    # Lazy imports
     import torch
     from transformers import (
         AutoTokenizer,
         AutoModelForSequenceClassification,
     )
-    from huggingface_hub import hf_hub_download
 
     _DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
     logger.info(
-        f"Downloading DistilBERT artifacts from {HF_REPO_ID}"
+        f"Loading DistilBERT artifacts from {HF_REPO_ID}"
     )
 
-    # Download metadata from the repository root
+    # Load metadata from the Hugging Face repository.
+    # This repository stores its files at the root.
+    from huggingface_hub import hf_hub_download
+
     metadata_path = hf_hub_download(
         repo_id=HF_REPO_ID,
         filename="metadata.json",
     )
 
-    # Read metadata
     metadata = load_json(metadata_path)
 
-    # Load model and tokenizer directly from Hugging Face.
-    # The repository contains config.json, model.safetensors,
-    # tokenizer.json, and tokenizer_config.json at its root.
+    # Load tokenizer and model from the repository.
     tokenizer = AutoTokenizer.from_pretrained(
         HF_REPO_ID,
         trust_remote_code=False,
@@ -111,8 +107,13 @@ def _load_artifacts():
     model.to(_DEVICE)
     model.eval()
 
-    # Validate metadata required for prediction
-    required_keys = {"max_len", "pos_label", "classes", "model_type"}
+    # Validate the metadata required for prediction.
+    required_keys = {
+        "max_len",
+        "pos_label",
+        "classes",
+        "model_type",
+    }
     missing_keys = required_keys - set(metadata.keys())
 
     if missing_keys:
@@ -120,8 +121,8 @@ def _load_artifacts():
             f"DistilBERT metadata is missing keys: {missing_keys}"
         )
 
-    _MODEL = model
     _TOKENIZER = tokenizer
+    _MODEL = model
     _METADATA = metadata
 
     logger.info(
@@ -134,7 +135,7 @@ def _load_artifacts():
 
 def predict_news_bert(text: str) -> dict:
     """
-    Predict REAL/FAKE for one news article.
+    Predict REAL/FAKE for a single news article.
 
     Confidence is the softmax probability of the predicted class.
     It is not necessarily a calibrated probability.
@@ -146,7 +147,7 @@ def predict_news_bert(text: str) -> dict:
 
     cleaned = minimal_clean(text)
 
-    # Handle empty input
+    # Handle empty input.
     if cleaned == "":
         return {
             "label": "UNKNOWN",
@@ -170,12 +171,30 @@ def predict_news_bert(text: str) -> dict:
         return_tensors="pt",
     )
 
-    # IMPORTANT:
-    # DistilBERT's sequence-classification forward method
-    # does not accept token_type_ids.
+    # Explicitly remove token_type_ids.
+    # DistilBERT does not accept this argument.
     inputs.pop("token_type_ids", None)
 
-    # Move tensors to the selected device
+    # Defensive filtering: pass only arguments accepted by
+    # this model's forward() method.
+    accepted_args = inspect.signature(
+        model.forward
+    ).parameters
+
+    inputs = {
+        key: value
+        for key, value in inputs.items()
+        if key in accepted_args
+    }
+
+    # Ensure input_ids are available.
+    if "input_ids" not in inputs:
+        raise RuntimeError(
+            "Tokenizer did not produce input_ids. "
+            "Check the tokenizer files in the Hugging Face repository."
+        )
+
+    # Move tensors to the selected device.
     inputs = {
         key: value.to(_DEVICE)
         for key, value in inputs.items()
@@ -186,13 +205,16 @@ def predict_news_bert(text: str) -> dict:
     # -----------------------------------------------------
     with torch.no_grad():
         logits = model(**inputs).logits
-        probs = torch.softmax(logits, dim=-1)[0].cpu().numpy()
+        probs = torch.softmax(
+            logits,
+            dim=-1,
+        )[0].cpu().numpy()
 
     pred_class = int(probs.argmax())
     confidence = float(probs[pred_class]) * 100
 
     # -----------------------------------------------------
-    # Label mapping from training metadata
+    # Label mapping from metadata
     # -----------------------------------------------------
     pos_label = metadata["pos_label"]
     classes = metadata["classes"]
