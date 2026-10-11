@@ -1,14 +1,9 @@
+
 """
 predict_bert.py
 ----------------
-Loads the fine-tuned BERT/DistilBERT artifacts produced by
-notebooks/Fake_News_BERT.ipynb and exposes:
-
-    predict_news_bert(text) -> {"label", "confidence", "is_calibrated", "model_used"}
-
-Mirrors predict.py / predict_bilstm.py's interface.
-
-Requires: torch, transformers
+Loads fine-tuned DistilBERT artifacts from Hugging Face
+and predicts whether news is FAKE or REAL.
 """
 
 import os
@@ -16,20 +11,12 @@ import sys
 import re
 
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
-from utils import MODELS_DIR, load_json, get_logger
+
+from utils import load_json, get_logger
 
 logger = get_logger("predict_bert")
 
-# ============================================================
-# BERT ARTIFACT DIRECTORY
-# Your actual structure is:
-# models/
-# └── bert_artifacts/
-#     ├── model/
-#     ├── tokenizer/
-#     └── metadata.json
-# ============================================================
-BERT_DIR = os.path.join(MODELS_DIR, "bert_artifacts")
+HF_REPO_ID = "tanmayagarwal2005/fake-news-distilbert"
 
 URL_RE = re.compile(r"http\S+|www\.\S+", re.IGNORECASE)
 HTML_RE = re.compile(r"<.*?>", re.DOTALL)
@@ -55,35 +42,55 @@ def _load_artifacts():
     global _MODEL, _TOKENIZER, _METADATA, _DEVICE
 
     if _MODEL is None:
-
-        model_dir = os.path.join(BERT_DIR, "model")
-        tok_dir = os.path.join(BERT_DIR, "tokenizer")
-        meta_path = os.path.join(BERT_DIR, "metadata.json")
-
-        # Check that all BERT artifacts exist
-        for p in [model_dir, tok_dir, meta_path]:
-            if not os.path.exists(p):
-                raise FileNotFoundError(
-                    f"Missing {p}. Fine-tune the model and place the "
-                    f"BERT artifacts inside models/bert_artifacts/."
-                )
-
-        # Lazy imports
         import torch
-        from transformers import AutoTokenizer, AutoModelForSequenceClassification
+        from transformers import (
+            AutoTokenizer,
+            AutoModelForSequenceClassification,
+        )
+
+        try:
+            # The repository contains the files at its root.
+            # from_pretrained accepts a Hugging Face repo ID directly.
+            _TOKENIZER = AutoTokenizer.from_pretrained(
+                HF_REPO_ID
+            )
+
+            _MODEL = AutoModelForSequenceClassification.from_pretrained(
+                HF_REPO_ID,
+                use_safetensors=True,
+            )
+
+            from huggingface_hub import hf_hub_download
+
+            metadata_path = hf_hub_download(
+                repo_id=HF_REPO_ID,
+                filename="metadata.json",
+            )
+
+            _METADATA = load_json(metadata_path)
+
+        except Exception as exc:
+            # Keep the original exception available in Streamlit logs.
+            logger.exception("Failed to load DistilBERT artifacts")
+            raise RuntimeError(
+                "Could not load DistilBERT artifacts from "
+                f"Hugging Face repository '{HF_REPO_ID}'. "
+                "Check repository visibility, file names, "
+                "network access, and dependencies."
+            ) from exc
+
+        required_keys = {"model_type", "max_len", "pos_label", "classes"}
+        missing_keys = required_keys - set(_METADATA.keys())
+
+        if missing_keys:
+            raise ValueError(
+                f"DistilBERT metadata is missing keys: {missing_keys}"
+            )
 
         _DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-        # Load tokenizer and trained model
-        _TOKENIZER = AutoTokenizer.from_pretrained(tok_dir)
-
-        _MODEL = AutoModelForSequenceClassification.from_pretrained(model_dir)
-
         _MODEL.to(_DEVICE)
         _MODEL.eval()
-
-        # Load metadata
-        _METADATA = load_json(meta_path)
 
         logger.info(
             f"Loaded {_METADATA['model_type']} on {_DEVICE} "
@@ -95,35 +102,27 @@ def _load_artifacts():
 
 def predict_news_bert(text: str) -> dict:
     """
-    Predict REAL/FAKE for a single piece of news text using
-    the fine-tuned BERT/DistilBERT model.
+    Predict REAL/FAKE using the fine-tuned DistilBERT model.
 
-    confidence is the softmax probability of the predicted class.
-
-    is_calibrated is False because softmax probability is not
-    automatically a calibrated probability.
+    Confidence is the softmax probability of the predicted class;
+    it is not guaranteed to be calibrated.
     """
-
-    import torch
-
-    model, tokenizer, metadata = _load_artifacts()
 
     cleaned = minimal_clean(text)
 
-    # Handle empty input
     if cleaned == "":
         return {
             "label": "UNKNOWN",
             "confidence": 0.0,
             "is_calibrated": False,
-            "model_used": metadata["model_type"],
+            "model_used": "DistilBERT",
             "note": "Input text was empty after cleaning; cannot classify.",
         }
 
-    # ============================================================
-    # TOKENIZATION
-    # Uses exactly the same max length as training
-    # ============================================================
+    import torch
+
+    model, tokenizer, metadata = _load_artifacts()
+
     inputs = tokenizer(
         cleaned,
         truncation=True,
@@ -132,39 +131,19 @@ def predict_news_bert(text: str) -> dict:
         return_tensors="pt",
     ).to(_DEVICE)
 
-    # ============================================================
-    # MODEL PREDICTION
-    # ============================================================
     with torch.no_grad():
-
         logits = model(**inputs).logits
-
         probs = torch.softmax(logits, dim=-1)[0].cpu().numpy()
 
     pred_class = int(probs.argmax())
-
     confidence = float(probs[pred_class]) * 100
 
-    # ============================================================
-    # LABEL MAPPING
-    #
-    # During training:
-    #
-    # POS_LABEL = "FAKE"
-    #
-    # Therefore:
-    # class 0 -> REAL
-    # class 1 -> FAKE
-    #
-    # This is determined from metadata rather than hard-coding
-    # the labels.
-    # ============================================================
     pos_label = metadata["pos_label"]
     classes = metadata["classes"]
 
     neg_label = next(
         (c for c in classes if c != pos_label),
-        classes[0]
+        classes[0],
     )
 
     if pred_class == 1:
@@ -180,24 +159,17 @@ def predict_news_bert(text: str) -> dict:
     }
 
 
-# ============================================================
-# COMMAND LINE TEST
-# ============================================================
-
 if __name__ == "__main__":
-
     if len(sys.argv) < 2:
         print('Usage: python src/predict_bert.py "news text here"')
         sys.exit(1)
 
     input_text = " ".join(sys.argv[1:])
-
     result = predict_news_bert(input_text)
 
     print(f"Prediction: {result['label']}")
     print(
-        f"Confidence "
-        f"(model probability estimate, not guaranteed calibrated): "
-        f"{result['confidence']}%"
+        "Confidence (model probability estimate, "
+        f"not guaranteed calibrated): {result['confidence']}%"
     )
     print(f"Model: {result['model_used']}")
