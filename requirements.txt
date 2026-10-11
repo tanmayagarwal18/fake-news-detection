@@ -13,3 +13,4 @@ tensorflow
 torch
 transformers
 safetensors
+huggingface_hub
