@@ -31,6 +31,11 @@ from utils import load_json, get_logger
 logger = get_logger("predict_bert")
 
 # ---------------------------------------------------------
+# DEBUG: Confirm that this exact version is running.
+# ---------------------------------------------------------
+print("DEBUG: UPDATED predict_bert.py IS RUNNING — VERSION 2")
+
+# ---------------------------------------------------------
 # Hugging Face repository
 # ---------------------------------------------------------
 HF_REPO_ID = "tanmayagarwal2005/fake-news-distilbert"
@@ -67,7 +72,11 @@ def _load_artifacts():
 
     global _MODEL, _TOKENIZER, _METADATA, _DEVICE
 
-    if _MODEL is not None:
+    if (
+        _MODEL is not None
+        and _TOKENIZER is not None
+        and _METADATA is not None
+    ):
         return _MODEL, _TOKENIZER, _METADATA
 
     import torch
@@ -75,25 +84,35 @@ def _load_artifacts():
         AutoTokenizer,
         AutoModelForSequenceClassification,
     )
+    from huggingface_hub import hf_hub_download
 
     _DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
     logger.info(
-        f"Loading DistilBERT artifacts from {HF_REPO_ID}"
+        "Loading DistilBERT artifacts from %s",
+        HF_REPO_ID,
     )
 
+    # -----------------------------------------------------
     # Load metadata from the Hugging Face repository.
-    # This repository stores its files at the root.
-    from huggingface_hub import hf_hub_download
-
+    # Files are stored at the repository root.
+    # -----------------------------------------------------
     metadata_path = hf_hub_download(
         repo_id=HF_REPO_ID,
         filename="metadata.json",
+        repo_type="model",
     )
 
     metadata = load_json(metadata_path)
 
-    # Load tokenizer and model from the repository.
+    if not isinstance(metadata, dict):
+        raise ValueError(
+            "metadata.json must contain a JSON object."
+        )
+
+    # -----------------------------------------------------
+    # Load tokenizer and model.
+    # -----------------------------------------------------
     tokenizer = AutoTokenizer.from_pretrained(
         HF_REPO_ID,
         trust_remote_code=False,
@@ -107,13 +126,16 @@ def _load_artifacts():
     model.to(_DEVICE)
     model.eval()
 
-    # Validate the metadata required for prediction.
+    # -----------------------------------------------------
+    # Validate required metadata.
+    # -----------------------------------------------------
     required_keys = {
         "max_len",
         "pos_label",
         "classes",
         "model_type",
     }
+
     missing_keys = required_keys - set(metadata.keys())
 
     if missing_keys:
@@ -121,13 +143,25 @@ def _load_artifacts():
             f"DistilBERT metadata is missing keys: {missing_keys}"
         )
 
+    if not isinstance(metadata["classes"], list) or not metadata["classes"]:
+        raise ValueError(
+            "metadata['classes'] must be a non-empty list."
+        )
+
+    if metadata["pos_label"] not in metadata["classes"]:
+        raise ValueError(
+            "metadata['pos_label'] must be present in metadata['classes']."
+        )
+
     _TOKENIZER = tokenizer
     _MODEL = model
     _METADATA = metadata
 
     logger.info(
-        f"Loaded {_METADATA['model_type']} on {_DEVICE} "
-        f"(max_len={_METADATA['max_len']})"
+        "Loaded %s on %s (max_len=%s)",
+        _METADATA["model_type"],
+        _DEVICE,
+        _METADATA["max_len"],
     )
 
     return _MODEL, _TOKENIZER, _METADATA
@@ -137,8 +171,8 @@ def predict_news_bert(text: str) -> dict:
     """
     Predict REAL/FAKE for a single news article.
 
-    Confidence is the softmax probability of the predicted class.
-    It is not necessarily a calibrated probability.
+    Confidence is the softmax probability of the predicted class,
+    expressed as a percentage. It is not necessarily calibrated.
     """
 
     import torch
@@ -147,7 +181,9 @@ def predict_news_bert(text: str) -> dict:
 
     cleaned = minimal_clean(text)
 
+    # -----------------------------------------------------
     # Handle empty input.
+    # -----------------------------------------------------
     if cleaned == "":
         return {
             "label": "UNKNOWN",
@@ -167,19 +203,30 @@ def predict_news_bert(text: str) -> dict:
         cleaned,
         truncation=True,
         padding=True,
-        max_length=metadata["max_len"],
+        max_length=int(metadata["max_len"]),
         return_tensors="pt",
     )
 
-    # Explicitly remove token_type_ids.
-    # DistilBERT does not accept this argument.
+    # Explicitly remove token_type_ids before the model call.
     inputs.pop("token_type_ids", None)
 
-    # Defensive filtering: pass only arguments accepted by
-    # this model's forward() method.
-    accepted_args = inspect.signature(
+    # -----------------------------------------------------
+    # DEBUG: Inspect the actual inputs and model signature.
+    # -----------------------------------------------------
+    forward_parameters = inspect.signature(
         model.forward
     ).parameters
+
+    print("DEBUG: Model call inputs:", list(inputs.keys()))
+    print(
+        "DEBUG: Model forward parameters:",
+        list(forward_parameters.keys()),
+    )
+
+    # Only pass arguments explicitly accepted by forward().
+    # This provides additional protection against unexpected
+    # tokenizer outputs being passed into the model.
+    accepted_args = set(forward_parameters.keys())
 
     inputs = {
         key: value
@@ -187,7 +234,7 @@ def predict_news_bert(text: str) -> dict:
         if key in accepted_args
     }
 
-    # Ensure input_ids are available.
+    # Ensure required input IDs are available.
     if "input_ids" not in inputs:
         raise RuntimeError(
             "Tokenizer did not produce input_ids. "
@@ -201,17 +248,30 @@ def predict_news_bert(text: str) -> dict:
     }
 
     # -----------------------------------------------------
+    # DEBUG: Confirm the final arguments before inference.
+    # -----------------------------------------------------
+    print(
+        "DEBUG: Final model arguments:",
+        list(inputs.keys()),
+    )
+
+    if "token_type_ids" in inputs:
+        raise RuntimeError(
+            "token_type_ids is still present before the model call."
+        )
+
+    # -----------------------------------------------------
     # Model prediction
     # -----------------------------------------------------
     with torch.no_grad():
-        logits = model(**inputs).logits
+        outputs = model(**inputs)
         probs = torch.softmax(
-            logits,
+            outputs.logits,
             dim=-1,
-        )[0].cpu().numpy()
+        )[0].cpu().tolist()
 
-    pred_class = int(probs.argmax())
-    confidence = float(probs[pred_class]) * 100
+    pred_class = int(max(range(len(probs)), key=lambda i: probs[i]))
+    confidence = float(probs[pred_class]) * 100.0
 
     # -----------------------------------------------------
     # Label mapping from metadata
@@ -219,11 +279,18 @@ def predict_news_bert(text: str) -> dict:
     pos_label = metadata["pos_label"]
     classes = metadata["classes"]
 
+    if pred_class >= len(classes):
+        raise ValueError(
+            f"Predicted class index {pred_class} exceeds "
+            f"the metadata classes list: {classes}"
+        )
+
     neg_label = next(
         (c for c in classes if c != pos_label),
         classes[0],
     )
 
+    # Preserve the original binary-class mapping.
     if pred_class == 1:
         display_label = str(pos_label).upper()
     else:
@@ -249,11 +316,18 @@ if __name__ == "__main__":
         sys.exit(1)
 
     input_text = " ".join(sys.argv[1:])
-    result = predict_news_bert(input_text)
 
-    print(f"Prediction: {result['label']}")
-    print(
-        "Confidence (model probability estimate, "
-        f"not guaranteed calibrated): {result['confidence']}%"
-    )
-    print(f"Model: {result['model_used']}")
+    try:
+        result = predict_news_bert(input_text)
+
+        print(f"Prediction: {result['label']}")
+        print(
+            "Confidence (model probability estimate, "
+            f"not guaranteed calibrated): {result['confidence']}%"
+        )
+        print(f"Model: {result['model_used']}")
+
+    except Exception as exc:
+        logger.exception("Command-line prediction failed")
+        print(f"ERROR: {exc}")
+        sys.exit(1)
