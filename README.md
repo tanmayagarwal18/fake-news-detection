@@ -229,9 +229,8 @@ actual run's results.
   article was flagged, not just the label.
 - Multilingual support.
 
-## 15. Team
+## 15. Made by
 
-- Name: _____________________
-- Roll No.: _____________________
-- Guide: _____________________
+- Name: TANMAY AGARWAL
+- Roll No.: 23BAI0172
 - Department: CSE
