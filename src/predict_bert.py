@@ -120,6 +120,7 @@ def predict_news_bert(text: str) -> dict:
     # Uses exactly the same max length as training
     # ============================================================
     
+
 inputs = tokenizer(
     cleaned,
     truncation=True,
@@ -128,14 +129,26 @@ inputs = tokenizer(
     return_tensors="pt",
 )
 
-# Remove this argument if the tokenizer provides it.
+# Remove token_type_ids before calling DistilBERT.
 inputs.pop("token_type_ids", None)
 
-# Move the remaining tensors to the model's device.
+# Keep only inputs supported by the model's forward method.
+import inspect
+
+accepted_args = inspect.signature(model.forward).parameters
+
+inputs = {
+    key: value
+    for key, value in inputs.items()
+    if key in accepted_args
+}
+
+# Move inputs to the selected device.
 inputs = {
     key: value.to(_DEVICE)
     for key, value in inputs.items()
 }
+
 
 
     # ============================================================
