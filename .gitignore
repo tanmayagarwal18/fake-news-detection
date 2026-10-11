@@ -1,0 +1,28 @@
+# Data
+data/raw/*
+!data/raw/.gitkeep
+data/processed/*
+!data/processed/.gitkeep
+
+# Models (large binary artifacts -- retrain instead of committing)
+models/*.joblib
+
+# Results (regenerate by re-running scripts)
+results/*.png
+results/*.csv
+results/*.json
+results/*.txt
+!results/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+venv/
+.venv/
+*.egg-info/
+
+# OS
+.DS_Store
+models/bert_artifacts/
+models/bilstm_artifacts/

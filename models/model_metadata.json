@@ -1,0 +1,12 @@
+{
+  "best_model": "Linear SVM",
+  "labels": [
+    "FAKE",
+    "REAL"
+  ],
+  "training_samples": 30912,
+  "testing_samples": 7729,
+  "tfidf_features": 5000,
+  "preprocessing": "spaCy tokenization, stopword removal, lemmatization",
+  "tfidf": "unigrams + bigrams, max_features=5000"
+}
